@@ -1,0 +1,194 @@
+import streamlit as st
+import openai
+import PyPDF2
+import pandas as pd
+import re
+import io
+import tempfile
+import os
+import json
+import pkg_resources
+
+
+st.set_page_config(
+    page_title="AI-Powered PDF QA Extractor",
+    layout="wide",
+    page_icon="📚"
+)
+
+
+openai.api_key = st.text_input("sk-proj-l2DR50T3BlbkFJoOVXyPzqRpKDo02q2YM44xeqkrYIeG-iSYSm74cVb98PGq244uyM30aQwXmCj-yR6fLqamk2IA", type="password")
+
+def extract_text_from_pdf(pdf_file):
+    """Extract text from PDF with progress tracking"""
+    try:
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        progress_bar = st.progress(0)
+        
+        for i, page in enumerate(pdf_reader.pages):
+            text += page.extract_text() + "\n"
+            progress_bar.progress((i + 1) / len(pdf_reader.pages))
+        
+        progress_bar.empty()
+        return text.strip()
+    except Exception as e:
+        st.error(f"PDF extraction failed: {str(e)}")
+        return None
+
+def analyze_with_openai(text):
+    """Analyze text with OpenAI to extract structured Q&A"""
+    if not openai.api_key:
+        st.error("OpenAI API key is missing")
+        return None
+    
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": """You are an expert at extracting exam questions from text. 
+                 Return questions with options, answers, and explanations in JSON format."""},
+                {"role": "user", "content": f"""
+                Extract all exam questions from this text and format as JSON array.
+                For each question include:
+                - id: sequential number starting from 1
+                - question: full question text ending with ?
+                - options: array of exactly 4 options (A-D)
+                - answer: correct option letter (A-D)
+                - explanation: brief 1-2 sentence explanation
+                
+                Text to analyze:
+                {text[:10000]}  # First 10k chars to stay within token limits
+                
+                Return ONLY valid JSON with this exact structure:
+                [{{"id": 1, "question": "...?", "options": ["A", "B", "C", "D"], "answer": "A", "explanation": "..."}}]
+                """}
+            ],
+            temperature=0.3,
+            max_tokens=2000
+        )
+        
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        st.error(f"OpenAI analysis failed: {str(e)}")
+        return None
+
+def create_structured_data(qa_data):
+    """Convert OpenAI response to structured DataFrame"""
+    if not qa_data:
+        return pd.DataFrame()
+    
+    structured_data = []
+    for item in qa_data:
+        options = (item.get('options', []) + [''] * 4)[:4]
+        
+        structured_data.append({
+            'ID': item.get('id', ''),
+            'Question': item.get('question', ''),
+            'Option A': options[0],
+            'Option B': options[1],
+            'Option C': options[2],
+            'Option D': options[3],
+            'Correct Answer': item.get('answer', ''),
+            'Explanation': item.get('explanation', '')
+        })
+    
+    return pd.DataFrame(structured_data)
+
+def check_package_versions():
+    """Check required package versions"""
+    required = {
+        'openai': '0.28.1',
+        'httpx': '0.24.1',
+        'streamlit': '>=1.22.0',
+        'PyPDF2': '>=3.0.0',
+        'pandas': '>=1.5.0'
+    }
+    
+    for package, version in required.items():
+        try:
+            installed = pkg_resources.get_distribution(package).version
+            if not pkg_resources.parse_version(installed) >= pkg_resources.parse_version(version):
+                st.warning(f"Requires {package}>={version}, found {installed}")
+        except pkg_resources.DistributionNotFound:
+            st.warning(f"Package {package} not found")
+
+def main():
+    st.title("📚 AI-Powered PDF QA Extractor")
+    st.markdown("Upload a PDF to extract questions with options, answers, and explanations")
+    
+    check_package_versions()
+    
+    uploaded_file = st.file_uploader("Choose a PDF file (max 10MB)", type="pdf")
+    
+    if uploaded_file and openai.api_key:
+        with st.spinner("Extracting and analyzing content..."):
+            with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                tmp_file.write(uploaded_file.read())
+                tmp_path = tmp_file.name
+            
+            try:
+                text = extract_text_from_pdf(tmp_path)
+                
+                if text:
+                    qa_data = analyze_with_openai(text)
+                    
+                    if qa_data:
+                        df = create_structured_data(qa_data)
+                        
+                        if not df.empty:
+                            st.success(f"✅ Extracted {len(df)} questions!")
+                            
+                            st.dataframe(
+                                df,
+                                column_config={
+                                    "ID": "ID",
+                                    "Question": "Question",
+                                    "Option A": "Option A",
+                                    "Option B": "Option B",
+                                    "Option C": "Option C",
+                                    "Option D": "Option D",
+                                    "Correct Answer": "Correct Answer",
+                                    "Explanation": "Explanation"
+                                },
+                                hide_index=True,
+                                use_container_width=True,
+                                height=600
+                            )
+                            
+                            st.divider()
+                            csv = df.to_csv(index=False).encode('utf-8')
+                            excel_buffer = io.BytesIO()
+                            df.to_excel(excel_buffer, index=False)
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.download_button(
+                                    "💾 Download CSV",
+                                    data=csv,
+                                    file_name="extracted_questions.csv",
+                                    mime="text/csv"
+                                )
+                            with col2:
+                                st.download_button(
+                                    "💾 Download Excel",
+                                    data=excel_buffer,
+                                    file_name="extracted_questions.xlsx",
+                                    mime="application/vnd.ms-excel"
+                                )
+                        else:
+                            st.warning("No questions found in the document")
+                    else:
+                        st.error("Failed to analyze the content")
+                else:
+                    st.error("Failed to extract text from PDF")
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+    elif not openai.api_key:
+        st.warning("Please enter your OpenAI API key to continue")
+
+if __name__ == "__main__":
+    main()
