@@ -1,0 +1,227 @@
+import streamlit as st
+import PyPDF2
+import pandas as pd
+import tempfile
+import re
+import os
+from pdf2image import convert_from_path
+from PIL import Image
+import io
+import numpy as np
+import concurrent.futures
+import logging
+import cv2
+import pytesseract
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Constants
+MAX_FILE_SIZE_MB = 200
+OCR_RESOLUTION = 600  # DPI
+MIN_TEXT_LENGTH = 200  # Threshold for OCR fallback
+
+# Function to preprocess images for OCR
+def preprocess_image(image):
+    try:
+        img = image.convert('L')
+        img_array = np.array(img)
+        p2, p98 = np.percentile(img_array, (2, 98))
+        img_array = np.clip((img_array - p2) * (255.0 / (p98 - p2)), 0, 255)
+        img_array = cv2.fastNlMeansDenoising(img_array.astype(np.uint8), None, 10, 7, 21)
+        return Image.fromarray(img_array)
+    except Exception as e:
+        logger.warning(f"Image preprocessing failed: {str(e)}")
+        return image
+
+# Function to process a single page with OCR
+def process_page(img):
+    try:
+        processed_img = preprocess_image(img)
+        return pytesseract.image_to_string(processed_img, config='--oem 3 --psm 6')
+    except Exception as e:
+        logger.error(f"Page processing failed: {str(e)}")
+        return ""
+
+# Function to extract text from PDF using OCR
+def extract_text_with_ocr(pdf_path):
+    try:
+        images = convert_from_path(pdf_path, dpi=OCR_RESOLUTION)
+        text_chunks = []
+        
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [executor.submit(process_page, img) for img in images]
+            for future in concurrent.futures.as_completed(futures):
+                text_chunks.append(future.result())
+        
+        return "\n".join([text for text in text_chunks if text.strip()])
+    except Exception as e:
+        logger.error(f"OCR extraction failed: {str(e)}")
+        return ""
+
+# Function to extract text from PDF files
+def extract_text_from_pdf(pdf_file):
+    try:
+        if pdf_file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
+            raise ValueError(f"File exceeds {MAX_FILE_SIZE_MB}MB limit")
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+            temp_file.write(pdf_file.read())
+            temp_file_path = temp_file.name
+        
+        text = ""
+        with open(temp_file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            text = "\n".join([page.extract_text() or "" for page in pdf_reader.pages])
+        
+        if len(text.strip()) < MIN_TEXT_LENGTH:
+            logger.info("Insufficient text, switching to OCR")
+            ocr_text = extract_text_with_ocr(temp_file_path)
+            text += "\n" + ocr_text
+        
+        return text.strip()
+    except Exception as e:
+        logger.error(f"Extraction failed: {str(e)}")
+        raise
+    finally:
+        if 'temp_file_path' in locals():
+            try:
+                os.unlink(temp_file_path)
+            except:
+                pass
+
+# Function to parse questions from text
+def parse_questions(text):
+    questions = []
+    question_pattern = re.compile(
+        r'(?P<prefix>Q\d+[:.]|Question\s+\d+[:.]?|\d+[.)])\s*(?P<text>.*?\?)',
+        re.IGNORECASE
+    )
+    choice_pattern = re.compile(r'^[A-D][.)]\s*(?P<text>.*)$', re.MULTILINE)
+    answer_pattern = re.compile(r'Answer[:.]?\s*(?P<letter>[A-D])', re.IGNORECASE)
+    explanation_pattern = re.compile(
+        r'Explanation[:.]?\s*(?P<text>.*?)(?=(Q\d+|Question\s+\d+|\d+[.)]|\Z))', 
+        re.IGNORECASE | re.DOTALL
+    )
+    
+    for q_match in question_pattern.finditer(text):
+        question = {
+            'id': q_match.group('prefix').strip('.'),
+            'text': q_match.group('text').strip(),
+            'choices': [],
+            'answer': '',
+            'explanation': ''
+        }
+        
+        choices_text = text[q_match.end():q_match.end()+500]
+        question['choices'] = [
+            c.group().strip() 
+            for c in choice_pattern.finditer(choices_text)
+        ][:4]
+        
+        if ans_match := answer_pattern.search(choices_text):
+            question['answer'] = ans_match.group('letter').upper()
+        
+        if exp_match := explanation_pattern.search(text[q_match.end():]):
+            question['explanation'] = exp_match.group('text').strip()
+        
+        questions.append(question)
+    
+    return questions
+
+# Function to create a structured DataFrame for questions
+def create_structured_dataframe(questions):
+    structured_data = []
+    
+    for q in questions:
+        options = q['choices'] + [''] * (4 - len(q['choices']))
+        row = {
+            'ID': q['id'],
+            'Question': q['text'],
+            'Option A': options[0],
+            'Option B': options[1],
+            'Option C': options[2],
+            'Option D': options[3],
+            'Correct Answer': q['answer'],
+            'Explanation': q['explanation']
+        }
+        structured_data.append(row)
+    
+    return pd.DataFrame(structured_data)
+
+# Function for parallel question answering (placeholder)
+def parallel_question_answering(context, question):
+    # Placeholder for actual implementation
+    return ["Answer 1", "Answer 2"]
+
+# Function for RAG question answering (placeholder)
+def rag_question_answering(context, question):
+    # Placeholder for actual implementation
+    return "RAG Answer"
+
+# Main function to run the Streamlit app
+def main():
+    st.set_page_config(page_title="PDF QA Extractor", layout="wide", page_icon="📚")
+    st.title("📚 PDF QA Extractor")
+    st.markdown("**Extract questions from textbooks and exams**")
+
+    uploaded_file = st.file_uploader("Upload PDF (max 200MB)", type=["pdf"])
+
+    if uploaded_file:
+        try:
+            with st.spinner("Processing document..."):
+                extracted_text = extract_text_from_pdf(uploaded_file)
+                if not extracted_text.strip():
+                    st.warning("No text could be extracted")
+                    return
+
+                questions = parse_questions(extracted_text)
+                if not questions:
+                    st.warning("No questions found.")
+                    return
+
+                for question in questions:
+                    answers = parallel_question_answering(extracted_text, question['text'])
+                    rag_answer = rag_question_answering(extracted_text, question['text'])
+                    question['answers'] = answers + [rag_answer]  # Add RAG answer
+
+                df = create_structured_dataframe(questions)
+                st.success(f"✅ Found {len(df)} questions!")
+                st.dataframe(df)
+
+                # Export options
+                st.divider()
+                st.markdown("### Export Options")
+                
+                # Export CSV
+                csv = df.to_csv(index=False).encode('utf-8')
+                # Export Excel
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False)
+
+                # Download buttons
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.download_button(
+                        label="💾 Download CSV",
+                        data=csv,
+                        file_name="questions.csv",
+                        mime="text/csv",
+                        help="Download as CSV file with all questions and answers"
+                    )
+                with col2:
+                    st.download_button(
+                        label="💾 Download Excel",
+                        data=excel_buffer.getvalue(),
+                        file_name="questions.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        help="Download as Excel file with all questions and answers"
+                    )
+
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+if __name__ == "__main__":
+    main()
