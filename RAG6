@@ -312,14 +312,14 @@ def main():
     """)
     
     uploaded_file = st.file_uploader(
-        "Select PDF file (max 5MB)",
+        "Select PDF file (max 200MB)",
         type=["pdf"],
         accept_multiple_files=False
     )
     
     if uploaded_file:
-        if uploaded_file.size > 5 * 1024 * 1024:
-            st.error("File exceeds 5MB size limit")
+        if uploaded_file.size > 200 * 1024 * 1024:
+            st.error("File exceeds 200MB size limit")
             return
         
         with st.spinner("Analyzing medical content..."):
