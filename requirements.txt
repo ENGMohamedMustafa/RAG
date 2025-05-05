@@ -1,11 +1,11 @@
-streamlit
 langchain
+langchain-community
 openai
+streamlit
 faiss-cpu
 chromadb
-pandas
-uuid
 huggingface_hub
-torch        
-transformers  
-tiktoken     
+pandas
+tiktoken
+torch
+transformers
