@@ -1,6 +1,11 @@
 streamlit
 langchain
-langchain-openai
+openai
 faiss-cpu
-pypdf
-tiktoken
+chromadb
+pandas
+uuid
+huggingface_hub
+torch        
+transformers  
+tiktoken     
