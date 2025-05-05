@@ -1,14 +1,12 @@
 import os
 import streamlit as st
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_openai import ChatOpenAI
-from langchain_core.memory import ConversationBufferMemory
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.document_loaders import PyPDFLoader, TextLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.llms import OpenAI
+from langchain.chains.question_answering import load_qa_chain
+from langchain.callbacks import get_openai_callback
 import tempfile
 
 # Page title
@@ -34,8 +32,6 @@ with st.sidebar:
     chunk_overlap = st.slider("Chunk Overlap:", min_value=0, max_value=500, value=100, step=10)
 
 # Initialize session states
-if "conversation" not in st.session_state:
-    st.session_state.conversation = None
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "processed_docs" not in st.session_state:
@@ -59,16 +55,19 @@ def process_documents(uploaded_files):
             try:
                 # Load and process the document based on file extension
                 if file_path.lower().endswith(".pdf"):
-                    loader = PyPDFLoader(file_path)
-                    documents.extend(loader.load())
+                    # First try with PyPDFLoader
+                    try:
+                        loader = PyPDFLoader(file_path)
+                        documents.extend(loader.load())
+                    except ImportError:
+                        st.error(f"Error loading PDF {uploaded_file.name}: Missing PDF dependencies.")
+                        st.info("Please install PyPDF2 with 'pip install pypdf2'")
+                        return False
                 elif file_path.lower().endswith(".txt"):
                     loader = TextLoader(file_path)
                     documents.extend(loader.load())
                 else:
                     st.warning(f"Unsupported file format: {uploaded_file.name}")
-            except ImportError as e:
-                st.error(f"Error loading {uploaded_file.name}: Missing PDF dependencies. Please install PyPDF2 with 'pip install pypdf2'")
-                return False
             except Exception as e:
                 st.error(f"Error loading {uploaded_file.name}: {str(e)}")
                 return False
@@ -115,7 +114,6 @@ if uploaded_files and not st.session_state.processed_docs:
 if st.button("Reset Conversation"):
     st.session_state.chat_history = []
     st.session_state.processed_docs = False
-    st.session_state.conversation = None
     st.session_state.vector_store = None
     st.experimental_rerun()
 
@@ -129,39 +127,19 @@ if st.session_state.processed_docs and st.session_state.vector_store:
                 st.error("Please enter your OpenAI API key in the sidebar.")
             else:
                 try:
-                    # Create the chain on demand
-                    retriever = st.session_state.vector_store.as_retriever(search_kwargs={"k": 3})
+                    # Search for relevant documents
+                    docs = st.session_state.vector_store.similarity_search(query)
                     
-                    # Create template for the response generation
-                    template = """
-                    You are a helpful assistant for question-answering tasks. 
-                    Use the following pieces of retrieved context to answer the question.
-                    If you don't know the answer, just say that you don't know.
-                    Use three sentences maximum and keep the answer concise.
+                    # Create QA chain
+                    llm = OpenAI(temperature=temperature, model_name=model_name)
+                    chain = load_qa_chain(llm, chain_type="stuff")
                     
-                    Question: {question}
-                    
-                    Context: {context}
-                    
-                    Answer:
-                    """
-                    prompt = ChatPromptTemplate.from_template(template)
-                    
-                    # Setup the chain
-                    llm = ChatOpenAI(model_name=model_name, temperature=temperature)
-                    
-                    rag_chain = (
-                        {"context": retriever, "question": RunnablePassthrough()}
-                        | prompt
-                        | llm
-                        | StrOutputParser()
-                    )
-                    
-                    # Get response
-                    answer = rag_chain.invoke(query)
+                    with get_openai_callback() as cb:
+                        response = chain.run(input_documents=docs, question=query)
+                        st.write(f"Total Tokens: {cb.total_tokens}, Cost: ${cb.total_cost:.5f}")
                     
                     # Add query and response to chat history
-                    st.session_state.chat_history.append({"query": query, "response": answer})
+                    st.session_state.chat_history.append({"query": query, "response": response})
                 except Exception as e:
                     st.error(f"Error generating response: {str(e)}")
     
@@ -174,3 +152,13 @@ if st.session_state.processed_docs and st.session_state.vector_store:
 else:
     st.info("Please upload documents to start the conversation.")
 
+# Display helpful information in the sidebar
+with st.sidebar:
+    st.markdown("---")
+    st.markdown("""
+    ## How to use this app
+    1. Enter your OpenAI API key in the sidebar
+    2. Upload PDF or text documents
+    3. Ask questions about the content
+    
+   
