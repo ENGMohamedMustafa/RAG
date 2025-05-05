@@ -1,12 +1,14 @@
 import os
 import streamlit as st
-from langchain.document_loaders import PyPDFLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.chat_models import ChatOpenAI
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationalRetrievalChain
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI
+from langchain_core.memory import ConversationBufferMemory
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.prompts import ChatPromptTemplate
 import tempfile
 
 # Page title
@@ -38,6 +40,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "processed_docs" not in st.session_state:
     st.session_state.processed_docs = False
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store = None
 
 # Function to process the document
 def process_documents(uploaded_files):
@@ -52,14 +56,27 @@ def process_documents(uploaded_files):
             with open(file_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             
-            # Load and process the document based on file extension
-            if file_path.endswith(".pdf"):
-                loader = PyPDFLoader(file_path)
-                documents.extend(loader.load())
-            elif file_path.endswith(".txt"):
-                loader = TextLoader(file_path)
-                documents.extend(loader.load())
+            try:
+                # Load and process the document based on file extension
+                if file_path.lower().endswith(".pdf"):
+                    loader = PyPDFLoader(file_path)
+                    documents.extend(loader.load())
+                elif file_path.lower().endswith(".txt"):
+                    loader = TextLoader(file_path)
+                    documents.extend(loader.load())
+                else:
+                    st.warning(f"Unsupported file format: {uploaded_file.name}")
+            except ImportError as e:
+                st.error(f"Error loading {uploaded_file.name}: Missing PDF dependencies. Please install PyPDF2 with 'pip install pypdf2'")
+                return False
+            except Exception as e:
+                st.error(f"Error loading {uploaded_file.name}: {str(e)}")
+                return False
         
+        if not documents:
+            st.error("No documents were successfully loaded. Please check your files and try again.")
+            return False
+            
         # Split documents into chunks
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -73,22 +90,15 @@ def process_documents(uploaded_files):
         
         # Create embeddings and vector store
         if api_key:
-            embeddings = OpenAIEmbeddings()
-            vector_store = FAISS.from_documents(chunks, embeddings)
-            
-            # Create conversation chain
-            llm = ChatOpenAI(model_name=model_name, temperature=temperature)
-            memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-            conversation_chain = ConversationalRetrievalChain.from_llm(
-                llm=llm,
-                retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
-                memory=memory
-            )
-            
-            st.session_state.conversation = conversation_chain
-            st.session_state.processed_docs = True
-            
-            return True
+            try:
+                embeddings = OpenAIEmbeddings()
+                vector_store = FAISS.from_documents(chunks, embeddings)
+                st.session_state.vector_store = vector_store
+                st.session_state.processed_docs = True
+                return True
+            except Exception as e:
+                st.error(f"Error creating embeddings: {str(e)}")
+                return False
         else:
             st.error("Please enter your OpenAI API key in the sidebar.")
             return False
@@ -106,10 +116,11 @@ if st.button("Reset Conversation"):
     st.session_state.chat_history = []
     st.session_state.processed_docs = False
     st.session_state.conversation = None
+    st.session_state.vector_store = None
     st.experimental_rerun()
 
 # Query input and response
-if st.session_state.processed_docs:
+if st.session_state.processed_docs and st.session_state.vector_store:
     query = st.text_input("Ask a question about your documents:")
     
     if query:
@@ -117,12 +128,42 @@ if st.session_state.processed_docs:
             if not api_key:
                 st.error("Please enter your OpenAI API key in the sidebar.")
             else:
-                # Get response from conversation chain
-                response = st.session_state.conversation({"question": query})
-                answer = response["answer"]
-                
-                # Add query and response to chat history
-                st.session_state.chat_history.append({"query": query, "response": answer})
+                try:
+                    # Create the chain on demand
+                    retriever = st.session_state.vector_store.as_retriever(search_kwargs={"k": 3})
+                    
+                    # Create template for the response generation
+                    template = """
+                    You are a helpful assistant for question-answering tasks. 
+                    Use the following pieces of retrieved context to answer the question.
+                    If you don't know the answer, just say that you don't know.
+                    Use three sentences maximum and keep the answer concise.
+                    
+                    Question: {question}
+                    
+                    Context: {context}
+                    
+                    Answer:
+                    """
+                    prompt = ChatPromptTemplate.from_template(template)
+                    
+                    # Setup the chain
+                    llm = ChatOpenAI(model_name=model_name, temperature=temperature)
+                    
+                    rag_chain = (
+                        {"context": retriever, "question": RunnablePassthrough()}
+                        | prompt
+                        | llm
+                        | StrOutputParser()
+                    )
+                    
+                    # Get response
+                    answer = rag_chain.invoke(query)
+                    
+                    # Add query and response to chat history
+                    st.session_state.chat_history.append({"query": query, "response": answer})
+                except Exception as e:
+                    st.error(f"Error generating response: {str(e)}")
     
     # Display chat history
     if st.session_state.chat_history:
@@ -133,14 +174,3 @@ if st.session_state.processed_docs:
 else:
     st.info("Please upload documents to start the conversation.")
 
-# Display helpful information in the sidebar
-with st.sidebar:
-    st.markdown("---")
-    st.markdown("""
-    ## How to use this app
-    1. Enter your OpenAI API key in the sidebar
-    2. Upload PDF or text documents
-    3. Ask questions about the content
-    
-    The app will retrieve relevant information from the documents and generate responses using the selected language model.
-    """)
