@@ -1,6 +1,6 @@
 import os
 import streamlit as st
-from langchain.document_loaders import PyPDFLoader, TextLoader
+from langchain.document_loaders import TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
@@ -8,6 +8,14 @@ from langchain.llms import OpenAI
 from langchain.chains.question_answering import load_qa_chain
 from langchain.callbacks import get_openai_callback
 import tempfile
+
+# Try to import PyPDF2 separately to handle missing dependency gracefully
+try:
+    from langchain.document_loaders import PyPDFLoader
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+    st.warning("📢 PyPDF2 is not installed. PDF support is disabled. Install with: pip install pypdf2")
 
 # Page title
 st.set_page_config(page_title="Document Q&A RAG App")
@@ -55,14 +63,12 @@ def process_documents(uploaded_files):
             try:
                 # Load and process the document based on file extension
                 if file_path.lower().endswith(".pdf"):
-                    # First try with PyPDFLoader
-                    try:
+                    if PDF_SUPPORT:
                         loader = PyPDFLoader(file_path)
                         documents.extend(loader.load())
-                    except ImportError:
-                        st.error(f"Error loading PDF {uploaded_file.name}: Missing PDF dependencies.")
-                        st.info("Please install PyPDF2 with 'pip install pypdf2'")
-                        return False
+                    else:
+                        st.error(f"Cannot process PDF file: {uploaded_file.name}")
+                        st.info("Please install PyPDF2 with 'pip install pypdf2' and restart the application")
                 elif file_path.lower().endswith(".txt"):
                     loader = TextLoader(file_path)
                     documents.extend(loader.load())
@@ -115,7 +121,8 @@ if st.button("Reset Conversation"):
     st.session_state.chat_history = []
     st.session_state.processed_docs = False
     st.session_state.vector_store = None
-    st.experimental_rerun()
+    # Use the newer rerun method
+    st.rerun()
 
 # Query input and response
 if st.session_state.processed_docs and st.session_state.vector_store:
@@ -159,6 +166,24 @@ with st.sidebar:
     ## How to use this app
     1. Enter your OpenAI API key in the sidebar
     2. Upload PDF or text documents
-    3. Ask questions about the content """)
+    3. Ask questions about the content
     
-   
+    The app will retrieve relevant information from the documents and generate responses using the selected language model.
+    """)
+    
+    # Display package installation instructions
+    st.markdown("---")
+    st.markdown("""
+    ## Package Installation
+    
+    If you're encountering errors, install these packages:
+    ```
+    pip install streamlit langchain openai faiss-cpu pypdf2 python-dotenv
+    ```
+    """)
+    
+    # Show the installed status of PyPDF2
+    if PDF_SUPPORT:
+        st.success("✅ PyPDF2 is installed - PDF support enabled")
+    else:
+        st.error("❌ PyPDF2 is not installed - PDF support disabled")
