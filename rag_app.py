@@ -159,6 +159,6 @@ with st.sidebar:
     ## How to use this app
     1. Enter your OpenAI API key in the sidebar
     2. Upload PDF or text documents
-    3. Ask questions about the content
+    3. Ask questions about the content """)
     
    
